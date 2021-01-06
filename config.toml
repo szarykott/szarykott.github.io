@@ -1,5 +1,5 @@
 # The URL the site will be built for
-base_url = "https://example.com"
+base_url = "https://perpendicular-programming.netlify.app"
 title = "Perpendicular Programming"
 
 # Whether to automatically compile all Sass files in the sass directory
