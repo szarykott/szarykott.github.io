@@ -1,0 +1,22 @@
+{
+  "name": "blog",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/szarykott/website.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/szarykott/website/issues"
+  },
+  "homepage": "https://github.com/szarykott/website#readme",
+  "dependencies": {
+    "@mermaid-js/mermaid-cli": "^8.8.4-1"
+  }
+}

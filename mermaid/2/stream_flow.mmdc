@@ -1,0 +1,5 @@
+graph LR
+    RabbitMq -->|"id = {1,2,3}"|MainStream
+    MainStream -->|id = 1|Stream1
+    MainStream -->|id = 2|Stream2
+    MainStream -->|id = 3|Stream3
