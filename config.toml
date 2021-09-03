@@ -1,5 +1,5 @@
 # The URL the site will be built for
-base_url = "https://perpendicular-programming.netlify.app"
+base_url = "https://szarykott.github.io"
 title = "Perpendicular Programming"
 
 # Whether to automatically compile all Sass files in the sass directory
@@ -13,7 +13,6 @@ highlight_code = true
 build_search_index = true
 
 theme = "DeepThought"
-
 
 [search]
 # Whether to include the title of the page/section in the index
