@@ -3,9 +3,10 @@ title = "What is perpendicular programming?"
 date = 2021-01-06
 +++
 
-### Words of intorduction
 
 Most programmers seem to be obsessed with parallel programming nowadays. Only some know about new paradigm that is emerging, slowly, but inevitably. It is called perpendicular programming. What is this new paradigm and why should you start using is today?
+
+<!-- more -->
 
 ### Comparison with parallel programming
 

@@ -1,9 +1,12 @@
 # The URL the site will be built for
-base_url = "https://szarykott.github.io"
+base_url = "https://tale-zola.netlify.app"
+
+# Use the Tale-Zola theme
+theme = "tale-zola"
 
 # The basic information about the site
-title = "Szarykott's dev blog"
-description = "Szarykott's dev blog"
+title = "Tala-Zola"
+description = "Tala-Zola is a minimal Zola theme helping you to build a light blog, and you can customise any information of the blog without having to modify the codes of the template."
 
 # Whether to automatically compile all Sass files in the sass directory
 compile_sass = true
@@ -24,8 +27,6 @@ taxonomies = [
   {name = "tags", feed = true}, # each tag will have its own feed
 ]
 
-theme = "tale-zola"
-
 [markdown]
 # Whether to do syntax highlighting
 # Theme can be customised by setting the `highlight_theme` variable to a theme supported by Zola
@@ -34,9 +35,9 @@ highlight_theme = "base16-ocean-light"
 
 [extra]
 # Basic infomation
-author = "Radosław Kot"
-github = "https://github.com/szarykott"
-email  = ""
+author = "Aaran Xu"
+github = "https://github.com/aaranxu"
+email  = "aaranxu@outlook.com"
 
 # Set date format in the site
 timeformat = "%B %e, %Y" # e.g. June 14, 2021
@@ -84,6 +85,13 @@ og_locale = "en_US"
 name = "Posts"
 url = "/"
 
+[[extra.menu]]
+name = "Tags"
+url = "tags"
+
+[[extra.menu]]
+name = "About"
+url = "about"
 
 [extra.footer]
 start_year = "2020"  # start year of the site

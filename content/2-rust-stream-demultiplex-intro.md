@@ -3,13 +3,14 @@ title = "Demultiplexing Streams in Rust"
 date = 2021-01-23
 +++
 
-### Problem
 
 I am working on message stream processing software.
 
 This is a small Rust application that has to perform two tasks :
 * demultiplex stream of RabbitMq messages to many clients connected via WebSocket
 * apply rate limiting to each demultiplexed stream dropping messages that exceed the limit
+
+<!-- more -->
 
 While reading messages from RabbitMq as a stream can be easily done using [Lapin](https://github.com/CleverCloud/lapin), task of demultiplexing them to multiple clients in an efficient way is something that does not seem oficially supported by `Streams`, nor there is a library available to handle it for me in a way I need.
 
