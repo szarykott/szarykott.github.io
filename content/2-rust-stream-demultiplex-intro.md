@@ -194,14 +194,14 @@ This is where things start to get interesting.
 Using `SelectAll` requires to put more constraints on `Demultiplexer` impl block, namely adding `Send` constraint on two types types.
 
 ```rust
-impl<I, S, O, K, V, E> Demultiplexer<I, S, O, K, E>
+impl<I, Si, O, K, V, E> Demultiplexer<I, Si, O, K, E>
 where
     I: Stream<Item = V> + Unpin + FusedStream + Send, // here
     K: Eq + Hash,
     V: Identifiable<Id = K>,
-    S: Sink<V> + Unpin,
-    O: Stream<Item = (K, S)> + Unpin + FusedStream + Send, // and here
-    E: FnMut(<S as Sink<V>>::Error),
+    Si: Sink<V> + Unpin,
+    O: Stream<Item = (K, Si)> + Unpin + FusedStream + Send, // and here
+    E: FnMut(< Si as Sink<V>>::Error),
 ```
 
 Issue with `SelectAll` is that while polling streams it has registered, it does not end entire flow if only one of `Streams` end. It is a major problem as `Demultiplexer` just has to finish its operations when input `Stream` is done. To overcome this problem I used ancient method of code reuse - copy-paste from `futures` crate with necessary tweaks. You can look the code up in there, in version 0.3.12. I'll only show here code I changed, that is `Stream` implementation for my `SelectAllCustom`.
