@@ -46,14 +46,14 @@ pub trait Identifiable {
     fn id<'a>(&'a self) -> &'a Self::Id;
 }
 
-impl<I, S, O, K, V, E> Demultiplexer<I, S, O, K, E>
+impl<I, B, O, K, V, E> Demultiplexer<I, B, O, K, E>
 where
     I: Stream<Item = V> + Unpin + FusedStream,
     K: Eq + Hash,
     V: Identifiable<Id = K>,
-    S: Sink<V> + Unpin,
-    O: Stream<Item = (K, S)> + Unpin + FusedStream,
-    E: FnMut(<S as Sink<V>>::Error),
+    B: Sink<V> + Unpin,
+    O: Stream<Item = (K, B)> + Unpin + FusedStream,
+    E: FnMut(<B as Sink<V>>::Error),
 {
     pub async fn run(mut self) {
         /* 
