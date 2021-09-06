@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+        <loc>https://szarykott.github.io/</loc>
+    </url>
+    <url>
+        <loc>https://szarykott.github.io/1-what-perpendicular/</loc>
+        <lastmod>2021-01-06</lastmod>
+    </url>
+    <url>
+        <loc>https://szarykott.github.io/2-rust-stream-demultiplex-intro/</loc>
+        <lastmod>2021-01-23</lastmod>
+    </url>
+    <url>
+        <loc>https://szarykott.github.io/3-stream-processing/</loc>
+        <lastmod>2021-09-04</lastmod>
+    </url>
+    <url>
+        <loc>https://szarykott.github.io/page/1/</loc>
+    </url>
+</urlset>

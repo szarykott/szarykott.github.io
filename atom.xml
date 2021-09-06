@@ -1,0 +1,673 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en">
+	<title>Szarykott&#x27;s dev blog</title>
+	<subtitle>Szarykott&#x27;s dev blog</subtitle>
+	<link href="https://szarykott.github.io/atom.xml" rel="self" type="application/atom+xml"/>
+  <link href="https://szarykott.github.io"/>
+	<generator uri="https://www.getzola.org/">Zola</generator>
+	<updated>2021-09-04T00:00:00+00:00</updated>
+	<id>https://szarykott.github.io/atom.xml</id>
+	<entry xml:lang="en">
+		<title>Brief description of stream multiplexing in Rust</title>
+		<published>2021-09-04T00:00:00+00:00</published>
+		<updated>2021-09-04T00:00:00+00:00</updated>
+		<link href="https://szarykott.github.io/3-stream-processing/" type="text/html"/>
+		<id>https://szarykott.github.io/3-stream-processing/</id>
+		<content type="html">&lt;p&gt;This post describes an idea for a stream multiplexing architecture. Issue is discussed in the context of Rust.&lt;&#x2F;p&gt;
+&lt;span id=&quot;continue-reading&quot;&gt;&lt;&#x2F;span&gt;&lt;h2 id=&quot;the-task&quot;&gt;The task&lt;&#x2F;h2&gt;
+&lt;p&gt;Application&#x27;s task is to concurrently pull messages from multiple streams and multiplex messages to output sinks.&lt;&#x2F;p&gt;
+&lt;p&gt;Clients are created dynamically by calling an endpoint and providing a predicate messages must fulfill. In case no client is connected stream messages need to be pulled to avoid queuing.&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;overview-of-solution&quot;&gt;Overview of solution&lt;&#x2F;h2&gt;
+&lt;p&gt;Chosen implementation language - Rust - puts a series of constraints on a solution, mainly related to difficulties in dealing with mutable shared state. I chose to use channels for communication between components. This way sharing memory happens due to message passing.&lt;&#x2F;p&gt;
+&lt;br&#x2F;&gt;
+&lt;p&gt;&lt;img src=&quot;.&#x2F;..&#x2F;..&#x2F;images&#x2F;3&#x2F;dataflow.png&quot; alt=&quot;desired flow&quot; &#x2F;&gt;&lt;&#x2F;p&gt;
+&lt;br&#x2F;&gt;
+&lt;p&gt;&lt;strong&gt;Point 1&lt;&#x2F;strong&gt; - &lt;code&gt;Router&lt;&#x2F;code&gt; pulls messages from a stream. The stream can be a RabbitMq messages stream, WebSocket connection or other that adheres to a &lt;code&gt;Stream&lt;&#x2F;code&gt; abstraction.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Point 2&lt;&#x2F;strong&gt; - &lt;code&gt;Router&lt;&#x2F;code&gt; maintains a collection of sinks and multiplexes an incoming stream of messages into respective sinks. A sink can be as simple as console output or as complex as WebSocket connection.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Point 3&lt;&#x2F;strong&gt; - &lt;code&gt;Supervisor&lt;&#x2F;code&gt; when called by external clients informs all routers about new output.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;strong&gt;Point 4&lt;&#x2F;strong&gt; - &lt;code&gt;Supervisor&lt;&#x2F;code&gt; creates all outputs.&lt;&#x2F;p&gt;
+&lt;p&gt;An important thing to note is that &lt;code&gt;Router&lt;&#x2F;code&gt; &lt;em&gt;pulls&lt;&#x2F;em&gt; messages from an stream and &lt;em&gt;pushes&lt;&#x2F;em&gt; them to sinks. It also has to be able to dynamically accept new sinks. I did not find any other way to implement it other than event loop. It listens for new messages from an input stream and supervisor and pushes messages to sinks.&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;pub struct Router;
+
+impl Router {
+    pub async fn run&amp;lt;I, O, S&amp;gt;(input_stream: I, new_outputs: O)
+    where
+        I: Stream&amp;lt;Item = (usize, usize)&amp;gt; + Unpin,
+        O: Stream&amp;lt;Item = (usize, S)&amp;gt; + Unpin,
+        S: Sink&amp;lt;usize, Error = String&amp;gt; + Unpin,
+    {
+        let mut input_stream = input_stream.fuse();
+        let mut new_outputs = new_outputs.fuse();
+
+        let mut state: HashMap&amp;lt;usize, S&amp;gt; = HashMap::new();
+
+        loop {
+            select! {
+                next_item = input_stream.next() =&amp;gt; match next_item {
+                    Some(next_item) =&amp;gt; Self::broadcast(&amp;amp;mut state, next_item).await,
+                    None =&amp;gt; break
+                },
+                next_output = new_outputs.next() =&amp;gt; match next_output {
+                    Some(next_output) =&amp;gt; Self::new_recipent(&amp;amp;mut state, next_output),
+                    None =&amp;gt; break
+                }
+            }
+        }
+    }
+    &amp;#x2F;&amp;#x2F; other functions ommited for brevity
+}
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;This simple example defines &lt;code&gt;I&lt;&#x2F;code&gt; as input stream which items are &lt;code&gt;(usize, usize)&lt;&#x2F;code&gt; tuples, where former is message key and latter is its value. &lt;code&gt;O&lt;&#x2F;code&gt; is a stream of supervisor orders, &lt;code&gt;(usize, S)&lt;&#x2F;code&gt; tuples, where former is the same messages key as in input stream and &lt;code&gt;S&lt;&#x2F;code&gt; is a sink for messages. A state is maintained in a HashMap that aggregates all keys and its respecive sinks. &lt;&#x2F;p&gt;
+&lt;p&gt;This particular implementation lacks cleaning and thus leaks memory. A simple cleaning routine might be to inspect state of all sinks every X messages and clean closed sinks (this will require adding more trait bounds to &lt;code&gt;S&lt;&#x2F;code&gt;).&lt;&#x2F;p&gt;
+&lt;h2 id=&quot;a-completed-example&quot;&gt;A completed example&lt;&#x2F;h2&gt;
+&lt;p&gt;An input and orders stream might look like that:&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;pub struct DummyStream(pub usize);
+
+impl Stream for DummyStream {
+    type Item = (usize, usize);
+
+    fn poll_next(mut self: Pin&amp;lt;&amp;amp;mut Self&amp;gt;, _cx: &amp;amp;mut Context&amp;lt;&amp;#x27;_&amp;gt;) -&amp;gt; Poll&amp;lt;Option&amp;lt;Self::Item&amp;gt;&amp;gt; {
+        self.0 += 1;
+        Poll::Ready(Some((if self.0 % 2 == 0 { 1 } else { 0 }, self.0)))
+    }
+}
+
+pub struct Orders(pub usize);
+
+impl Stream for Orders {
+    type Item = (usize, Output&amp;lt;Box&amp;lt;dyn Fn(usize)&amp;gt;&amp;gt;);
+
+    fn poll_next(mut self: Pin&amp;lt;&amp;amp;mut Self&amp;gt;, _cx: &amp;amp;mut Context&amp;lt;&amp;#x27;_&amp;gt;) -&amp;gt; Poll&amp;lt;Option&amp;lt;Self::Item&amp;gt;&amp;gt; {
+        self.0 += 1;
+        match self.0 {
+            1 =&amp;gt; Poll::Ready(Some((
+                1,
+                Output(Box::new(|i| println!(&amp;quot;Output is odd: {}&amp;quot;, i))),
+            ))),
+            2 =&amp;gt; Poll::Ready(Some((
+                2,
+                Output(Box::new(|i| println!(&amp;quot;Output is even: {}&amp;quot;, i))),
+            ))),
+            _ =&amp;gt; Poll::Pending,
+        }
+    }
+}
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Input is just a stream of subsequent integer numbers. If number is even, key is 1 and 0 otherwise. &lt;code&gt;Orders&lt;&#x2F;code&gt; is a stream of only two messages that define different &lt;code&gt;Output&lt;&#x2F;code&gt;&#x27;s for even and odd numbers.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;Output&lt;&#x2F;code&gt; is defined as:&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;pub struct Output&amp;lt;T&amp;gt;(pub T);
+
+impl&amp;lt;T&amp;gt; Sink&amp;lt;usize&amp;gt; for Output&amp;lt;T&amp;gt;
+where
+    T: Fn(usize),
+{
+    type Error = String;
+
+    fn start_send(self: Pin&amp;lt;&amp;amp;mut Self&amp;gt;, item: usize) -&amp;gt; Result&amp;lt;(), Self::Error&amp;gt; {
+        (self.0)(item);
+        Ok(())
+    }
+
+    &amp;#x2F;&amp;#x2F; rest of Sink functions omitted
+}
+
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;It simply accepts a closure that dictates what to do with next stream item.&lt;&#x2F;p&gt;
+&lt;p&gt;Putting it all together, a sample program might look a bit like this:&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;#[tokio::main]
+async fn main() {
+    let stream = input_stream::DummyStream(0);
+    let orders = input_stream::Orders(0);
+
+    router::Router::run(stream, orders).await;
+}
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;It outputs something like this:
+&lt;img src=&quot;.&#x2F;..&#x2F;..&#x2F;images&#x2F;3&#x2F;output.png&quot; alt=&quot;desired flow&quot; &#x2F;&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Streams are thus multiplexed to different sinks!&lt;&#x2F;p&gt;
+&lt;p&gt;Important thing about this implementation is complete lack of locks. There can be as many input streams as needed, each having its own router. Since most channel libraries allow cloning senders, a single output sink can be cloned and given away to multiple routers. Output sink can be as simple as in this example, but it can also be more complex, such as component that sends received message through WebSocket connection, but at the same time it has to be able to receive Ping messages and responds with Pongs. It slightly complicates the implementation, as Output Sink has to run an event loop of its own, but idea stays the same.&lt;&#x2F;p&gt;
+&lt;p&gt;Downside of this implementation is maintaining state. A lot has been omitted, such as aforementioned cleaning, fault tolerance, retrying, etc.&lt;&#x2F;p&gt;
+&lt;p&gt;I am wondering what would be the best way to achieve the initial goal. Are there any better implementations or architectures in Rust?&lt;&#x2F;p&gt;
+</content>
+	</entry>
+	<entry xml:lang="en">
+		<title>Demultiplexing Streams in Rust</title>
+		<published>2021-01-23T00:00:00+00:00</published>
+		<updated>2021-01-23T00:00:00+00:00</updated>
+		<link href="https://szarykott.github.io/2-rust-stream-demultiplex-intro/" type="text/html"/>
+		<id>https://szarykott.github.io/2-rust-stream-demultiplex-intro/</id>
+		<content type="html">&lt;p&gt;I am working on message stream processing software.&lt;&#x2F;p&gt;
+&lt;p&gt;This is a small Rust application that has to perform two tasks :&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;demultiplex stream of RabbitMq messages to many clients connected via WebSocket&lt;&#x2F;li&gt;
+&lt;li&gt;apply rate limiting to each demultiplexed stream dropping messages that exceed the limit&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;span id=&quot;continue-reading&quot;&gt;&lt;&#x2F;span&gt;
+&lt;p&gt;While reading messages from RabbitMq as a stream can be easily done using &lt;a href=&quot;https:&#x2F;&#x2F;github.com&#x2F;CleverCloud&#x2F;lapin&quot;&gt;Lapin&lt;&#x2F;a&gt;, task of demultiplexing them to multiple clients in an efficient way is something that does not seem oficially supported by &lt;code&gt;Streams&lt;&#x2F;code&gt;, nor there is a library available to handle it for me in a way I need.&lt;&#x2F;p&gt;
+&lt;p&gt;Therefore a problem to solve is how to demultiplex &lt;code&gt;Stream&lt;&#x2F;code&gt; into multiple &lt;code&gt;Streams&lt;&#x2F;code&gt; based on some message properties (in this particular case message headers). Problem of applying rate limitation will not be described in this post.&lt;&#x2F;p&gt;
+&lt;p&gt;As one picture is worth a thousand words, here&#x27;s a graph depicting my desired workflow:&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;img src=&quot;.&#x2F;..&#x2F;..&#x2F;images&#x2F;2&#x2F;stream_flow.png&quot; alt=&quot;desired flow&quot; &#x2F;&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;It is important to note that implementation needs to be able to dynamically accepts new orders and modify number of resulting &lt;code&gt;Streams&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;Other relevant note is that not all messages from main stream need to be rerouted. If there is no &amp;quot;job&amp;quot; that given message matches, the message should be dropped.&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;available-libraries&quot;&gt;Available libraries&lt;&#x2F;h3&gt;
+&lt;p&gt;The only library I found that deals with demultiplexing (and multiplexing) is &lt;a href=&quot;https:&#x2F;&#x2F;github.com&#x2F;Hirrolot&#x2F;mux-stream&quot;&gt;mux-stream&lt;&#x2F;a&gt;.
+Unfortunately, it seems to only support static (aka known at compile time) demultiplexing. I want to be able to add new &lt;code&gt;Streams&lt;&#x2F;code&gt; to my demultiplexer dynamically. Therefore I need my own implementation.&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;the-demultiplexer&quot;&gt;The Demultiplexer&lt;&#x2F;h3&gt;
+&lt;p&gt;While implementing demultiplexer I tried to stay as generic as possible, that is why there are so many generic type constraints.&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;pub struct Demultiplexer&amp;lt;I, S, O, K, E&amp;gt; {
+    input: I,
+    sinks: HashMap&amp;lt;K, S&amp;gt;,
+    orders: O,
+    error_handler: E,
+}
+
+pub trait Identifiable {
+    type Id;
+    fn id&amp;lt;&amp;#x27;a&amp;gt;(&amp;amp;&amp;#x27;a self) -&amp;gt; &amp;amp;&amp;#x27;a Self::Id;
+}
+
+impl&amp;lt;I, Si, O, K, V, E&amp;gt; Demultiplexer&amp;lt;I, Si, O, K, E&amp;gt;
+where
+    I: Stream&amp;lt;Item = V&amp;gt; + Unpin + FusedStream,
+    K: Eq + Hash,
+    V: Identifiable&amp;lt;Id = K&amp;gt;,
+    Si: Sink&amp;lt;V&amp;gt; + Unpin,
+    O: Stream&amp;lt;Item = (K, Si)&amp;gt; + Unpin + FusedStream,
+    E: FnMut(&amp;lt; Si as Sink&amp;lt;V&amp;gt;&amp;gt;::Error),
+{
+    pub async fn run(mut self) {
+        &amp;#x2F;* 
+            omitted for now
+            event loop goes here
+        *&amp;#x2F;
+    }
+}
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;All those generic parameters correspond to one functionality of &lt;code&gt;Demultiplexer&lt;&#x2F;code&gt;.
+Starting from the top:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;I&lt;&#x2F;code&gt; is an input stream, a stream that that has to be demultiplexed into different sinks&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;K&lt;&#x2F;code&gt; is a type of a key in &lt;code&gt;HashMap&lt;&#x2F;code&gt; that stores sinks&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;V&lt;&#x2F;code&gt; is a value that is being passed in by input stream&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;S&lt;&#x2F;code&gt; is a sink for demultiplexed values&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;O&lt;&#x2F;code&gt; is a stream of orders that are dynamically added to active sinks&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;E&lt;&#x2F;code&gt; is an error handler for errors that might arise while writing to sink&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;One trait &lt;code&gt;Identifiable&lt;&#x2F;code&gt; is also introduced to allow identification of message of type &lt;code&gt;V&lt;&#x2F;code&gt; in &lt;code&gt;Demultiplexer&lt;&#x2F;code&gt;. I&#x27;ve not found any suitable trait from standard library, but I did not bother much to do it either.&lt;&#x2F;p&gt;
+&lt;p&gt;Notable difference between my dream implementation and one presented above is usage of &lt;code&gt;Sinks&lt;&#x2F;code&gt; instead of &lt;code&gt;Streams&lt;&#x2F;code&gt; as output method. Why is that?
+While trying to expose a collection of &lt;code&gt;Streams&lt;&#x2F;code&gt; from &lt;code&gt;Demultiplexer&lt;&#x2F;code&gt; I ran into issues with nature of &lt;code&gt;Streams&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;code&gt;Streams&lt;&#x2F;code&gt; can be polled, so to write to it, you need to have a writing part - and that is exactly abstraction &lt;code&gt;Sink&lt;&#x2F;code&gt; provides. Also, when stream uses waker to inform executor that new message is available, so that it can poll it, it wakes up entire task. If all produced &lt;code&gt;Streams&lt;&#x2F;code&gt; operated as a part of one task, all would be polled, but only one would receive message. I do not know if it is possible and even if it was, it would be inefficient.&lt;&#x2F;p&gt;
+&lt;p&gt;Soultion is to make &lt;code&gt;Demultiplexer&lt;&#x2F;code&gt; into kind of event loop that polls main stream and writes messages to appropriate buffers represented by &lt;code&gt;Sinks&lt;&#x2F;code&gt; (and possibly other executor tasks). Having an event loop also allows for accepting new orders, thus dynamically adding new outputs from a &lt;code&gt;Stream&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;It makes my implemntation similar to &lt;a href=&quot;https:&#x2F;&#x2F;docs.rs&#x2F;futures&#x2F;0.3.12&#x2F;futures&#x2F;stream&#x2F;trait.StreamExt.html#method.forward&quot;&gt;&lt;code&gt;forward&lt;&#x2F;code&gt;&lt;&#x2F;a&gt; function from &lt;code&gt;StreamExt&lt;&#x2F;code&gt;&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;demultiplexing&quot;&gt;Demultiplexing&lt;&#x2F;h3&gt;
+&lt;p&gt;To handle both new messages from input stream and new orders, I need &lt;code&gt;Demultiplexer&lt;&#x2F;code&gt; to run in a loop checking for new messages and orders. At least I hope that I have to, since I did not come up with any better idea. I was hoping to make this component less self aware and composable with other &lt;code&gt;Stream&lt;&#x2F;code&gt;, but I did not succeed in it.&lt;&#x2F;p&gt;
+&lt;p&gt;Having said that, my implementation works fine, but is not as perfect as I wanted to be.&lt;&#x2F;p&gt;
+&lt;p&gt;In Rust we have couple of ways to poll multiple &lt;code&gt;Streams&lt;&#x2F;code&gt; concurrently (mind that not in parallel!):&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;code&gt;FuturesUnordered&lt;&#x2F;code&gt; - I did not dig into this one this much for two reasons. First, I is used with &lt;code&gt;Futures&lt;&#x2F;code&gt;, second, &lt;code&gt;SelectAll&lt;&#x2F;code&gt; actually uses it under the hood.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;SelectAll&lt;&#x2F;code&gt; - it promises to poll multiple streams concurrently. It can be built either with &lt;code&gt;select_all&lt;&#x2F;code&gt; function or manually, pushing all streams one by one. It requires that all streams are of the same type. It can be hacked a bit to accept stream of multiple types, but it comes at a cost. I&#x27;ll write more details about it later.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;select!&lt;&#x2F;code&gt; - a macro that expands into code that polls a known number of &lt;code&gt;Streams&lt;&#x2F;code&gt; or &lt;code&gt;Futures&lt;&#x2F;code&gt; and executes &amp;quot;callbacks&amp;quot; that were passed in. Stream are polled in random order that changes with every poll.&lt;&#x2F;li&gt;
+&lt;li&gt;&lt;code&gt;select_biased!&lt;&#x2F;code&gt; - similar to &lt;code&gt;select!&lt;&#x2F;code&gt;, but polls &lt;code&gt;Streams&lt;&#x2F;code&gt; in order of declaration.&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;My goal in next paragraphs is to examine all those techniques and select the one that is both easiest to write and fastest to perform in runtime.&lt;&#x2F;p&gt;
+&lt;h4 id=&quot;select&quot;&gt;select!&lt;&#x2F;h4&gt;
+&lt;p&gt;To run even loop with &lt;code&gt;select!&lt;&#x2F;code&gt; I need to put all code in a loop and the use macro.&lt;&#x2F;p&gt;
+&lt;p&gt;Its syntax is:&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;select!
+{
+    variable = stream-to-await =&amp;gt; {
+        &amp;quot;callback&amp;quot; that can use variable
+    }  
+}    
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;And putting it in action:&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;pub async fn run(mut self) {
+    loop {
+        select! {
+            input = self.input.next() =&amp;gt; {
+                match input {
+                    Some(input) =&amp;gt; self.forward_input(input).await,
+                    None =&amp;gt; {
+                        break;
+                    }
+                }
+            },
+            order = self.orders.next() =&amp;gt; {
+                if let Some(order) = order {
+                    self.sinks.insert(order.0, order.1);
+                }
+            },
+            complete =&amp;gt; break,
+        }
+    }
+}
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;It is very simple, on new input message I simply forward it to all sinks with &lt;code&gt;forward_input&lt;&#x2F;code&gt; function. When input stream is finished I break event loop as it will no longer be useful.&lt;&#x2F;p&gt;
+&lt;p&gt;When new order arrives I just push new &lt;code&gt;Sink&lt;&#x2F;code&gt; into set of available &lt;code&gt;Sinks&lt;&#x2F;code&gt; keyed under id it is associated with.&lt;&#x2F;p&gt;
+&lt;p&gt;Macro accepts also &lt;code&gt;complete&lt;&#x2F;code&gt; and &lt;code&gt;default&lt;&#x2F;code&gt; branches that handle cases when, respectively, all streams are finished and none of them is.&lt;&#x2F;p&gt;
+&lt;p&gt;Function to forward input is short, split in two so that other implementation with &lt;code&gt;SelectAll&lt;&#x2F;code&gt; can use it.&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;async fn forward_input(&amp;amp;mut self, element: V) {
+    Self::forward_input_woself(&amp;amp;mut self.sinks, &amp;amp;mut self.error_handler, element).await;
+}
+
+async fn forward_input_woself(sinks: &amp;amp;mut HashMap&amp;lt;K, S&amp;gt;, error_handler: &amp;amp;mut E, element: V) {
+    let id = element.id();
+    if let Some(sink) = sinks.get_mut(id) {
+        let send_result = sink.send(element).await;
+        if let Err(e) = send_result {
+            (error_handler)(e);
+        }
+    }
+}
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;h4 id=&quot;select-biased&quot;&gt;select_biased!&lt;&#x2F;h4&gt;
+&lt;p&gt;Implementation is identical, only change is macro&#x27;s name. It is worth noting that order&#x27;s are polled first. This is due to the fact that input stream is always ready in my test app, so to poll orders, I need to poll it first. It might have some implications discussed in further sections.&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;pub async fn run(mut self) {
+    loop {
+        select_biased! {
+            order = self.orders.next() =&amp;gt; {
+                if let Some(order) = order {
+                    self.sinks.insert(order.0, order.1);
+                }
+            },
+            input = self.input.next() =&amp;gt; {
+                match input {
+                    Some(input) =&amp;gt; self.forward_input(input).await,
+                    None =&amp;gt; {
+                        break;
+                    }
+                }
+            },
+            complete =&amp;gt; break,
+        }
+    }
+}
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;h4 id=&quot;selectall&quot;&gt;SelectAll&lt;&#x2F;h4&gt;
+&lt;p&gt;This is where things start to get interesting.
+Using &lt;code&gt;SelectAll&lt;&#x2F;code&gt; requires to put more constraints on &lt;code&gt;Demultiplexer&lt;&#x2F;code&gt; impl block, namely adding &lt;code&gt;Send&lt;&#x2F;code&gt; constraint on two types types.&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;impl&amp;lt;I, Si, O, K, V, E&amp;gt; Demultiplexer&amp;lt;I, Si, O, K, E&amp;gt;
+where
+    I: Stream&amp;lt;Item = V&amp;gt; + Unpin + FusedStream + Send, &amp;#x2F;&amp;#x2F; here
+    K: Eq + Hash,
+    V: Identifiable&amp;lt;Id = K&amp;gt;,
+    Si: Sink&amp;lt;V&amp;gt; + Unpin,
+    O: Stream&amp;lt;Item = (K, Si)&amp;gt; + Unpin + FusedStream + Send, &amp;#x2F;&amp;#x2F; and here
+    E: FnMut(&amp;lt; Si as Sink&amp;lt;V&amp;gt;&amp;gt;::Error),
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Issue with &lt;code&gt;SelectAll&lt;&#x2F;code&gt; is that while polling streams it has registered, it does not end entire flow if only one of &lt;code&gt;Streams&lt;&#x2F;code&gt; end. It is a major problem as &lt;code&gt;Demultiplexer&lt;&#x2F;code&gt; just has to finish its operations when input &lt;code&gt;Stream&lt;&#x2F;code&gt; is done. To overcome this problem I used ancient method of code reuse - copy-paste from &lt;code&gt;futures&lt;&#x2F;code&gt; crate with necessary tweaks. You can look the code up in there, in version 0.3.12. I&#x27;ll only show here code I changed, that is &lt;code&gt;Stream&lt;&#x2F;code&gt; implementation for my &lt;code&gt;SelectAllCustom&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;Code that is commented out is the exact code that was breaking my application.&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;impl&amp;lt;St: Stream + Unpin&amp;gt; Stream for SelectAllCustom&amp;lt;St&amp;gt; {
+    type Item = St::Item;
+
+    fn poll_next(mut self: Pin&amp;lt;&amp;amp;mut Self&amp;gt;, cx: &amp;amp;mut Context&amp;lt;&amp;#x27;_&amp;gt;) -&amp;gt; Poll&amp;lt;Option&amp;lt;Self::Item&amp;gt;&amp;gt; {
+        loop {
+            match ready!(self.inner.poll_next_unpin(cx)) {
+                Some((Some(item), remaining)) =&amp;gt; {
+                    self.push(remaining);
+                    return Poll::Ready(Some(item));
+                }
+                &amp;#x2F;&amp;#x2F; Some((None, _)) =&amp;gt; {
+                &amp;#x2F;&amp;#x2F;     &amp;#x2F;&amp;#x2F; `FuturesUnordered` thinks it isn&amp;#x27;t terminated
+                &amp;#x2F;&amp;#x2F;     &amp;#x2F;&amp;#x2F; because it yielded a Some.
+                &amp;#x2F;&amp;#x2F;     &amp;#x2F;&amp;#x2F; We do not return, but poll `FuturesUnordered`
+                &amp;#x2F;&amp;#x2F;     &amp;#x2F;&amp;#x2F; in the next loop iteration.
+                &amp;#x2F;&amp;#x2F; }
+                _ =&amp;gt; return Poll::Ready(None),
+            }
+        }
+    }
+}
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Knowing that, here&#x27;s &lt;code&gt;Demultiplexer&lt;&#x2F;code&gt; implementation using it.&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;enum DemuxTask&amp;lt;V, K, S&amp;gt; {
+    Order((K, S)),
+    Input(V),
+}
+
+pub async fn run(mut self) {
+    let orders = self.orders.map(|o| DemuxTask::&amp;lt;V, K, S&amp;gt;::Order(o));
+    let input = self.input.map(|v| DemuxTask::&amp;lt;V, K, S&amp;gt;::Input(v));
+    let mut tasks: SelectAllCustom&amp;lt;Box&amp;lt;dyn Stream&amp;lt;Item = DemuxTask&amp;lt;V, K, S&amp;gt;&amp;gt; + Unpin + Send&amp;gt;&amp;gt; =
+        SelectAllCustom::new();
+    tasks.push(Box::new(orders));
+    tasks.push(Box::new(input));
+    loop {
+        match tasks.next().await {
+            Some(DemuxTask::Order((key, sink))) =&amp;gt; {
+                self.sinks.insert(key, sink);
+            }
+            Some(DemuxTask::Input(input)) =&amp;gt; {
+                Self::forward_input_woself(&amp;amp;mut self.sinks, &amp;amp;mut self.error_handler, input)
+                    .await
+            }
+            None =&amp;gt; break,
+        }
+    }
+}
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Hack to actually make &lt;code&gt;SelectAll&lt;&#x2F;code&gt; work with different types of &lt;code&gt;Streams&lt;&#x2F;code&gt; is to explicitly specify &lt;code&gt;SelectAll&lt;&#x2F;code&gt; type to &lt;code&gt;SelectAllCustom&amp;lt;Box&amp;lt;dyn Stream&amp;lt;Item = DemuxTask&amp;lt;V, K, S&amp;gt;&amp;gt; + Unpin + Send&amp;gt;&amp;gt;&lt;&#x2F;code&gt; and create an enum to accomodate both message types - &lt;code&gt;DemuxTask&lt;&#x2F;code&gt;. It works, but has some additional cost related to &lt;code&gt;Stream&lt;&#x2F;code&gt; transformations with &lt;code&gt;map&lt;&#x2F;code&gt; and also with boxing &lt;code&gt;Streams&lt;&#x2F;code&gt;, however I am not sure how it is handled later by &lt;code&gt;SelectAll&lt;&#x2F;code&gt; implementation.&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;ease-of-use&quot;&gt;Ease of use&lt;&#x2F;h3&gt;
+&lt;p&gt;Regarding ease of use versions of &lt;code&gt;Demultiplexer&lt;&#x2F;code&gt; using &lt;code&gt;select*&lt;&#x2F;code&gt; macros are clear winners. &lt;code&gt;SelectAll&lt;&#x2F;code&gt; is not only clumsier to use, but to work it also requires copy pasting code, unless there is a way to make library version do what I want it to.&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;performance&quot;&gt;Performance&lt;&#x2F;h3&gt;
+&lt;p&gt;To test performance of &lt;code&gt;Demultiplexer&lt;&#x2F;code&gt; I need a test application and a profiler or benchmark tool. Let&#x27;s start with the first one.&lt;&#x2F;p&gt;
+&lt;p&gt;I am using &lt;code&gt;tokio&lt;&#x2F;code&gt; as async runtime and &lt;code&gt;flume&lt;&#x2F;code&gt; as my channels library. Application defines &lt;code&gt;Message&lt;&#x2F;code&gt; type and creates 100_000_000 messages with 3 distinct ids. I am using single-threaded runtime as it was actually faster than multithreaded one in this small application, probably due to startup and teardown costs. It does not matter that much actually, as long as all tests are executed in same environment. I should have probably test all functions in multithreaded runtime as well, as performance is a tricky beast, but to keep this post more focused, I decided not to.&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;mod client;
+mod demux;
+mod select_all;
+
+use client::*;
+use demux::*;
+use futures::{stream, StreamExt};
+use std::fmt::Display;
+
+fn main() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    rt.block_on(tokio_main());
+}
+
+async fn tokio_main() {
+    let messages = vec![
+        Message {
+            id: 1,
+            word: &amp;quot;one&amp;quot;.into(),
+        },
+        Message {
+            id: 2,
+            word: &amp;quot;two&amp;quot;.into(),
+        },
+        Message {
+            id: 3,
+            word: &amp;quot;three&amp;quot;.into(),
+        },
+    ];
+
+    let take = 100_000_000;
+
+    let values = stream::iter(messages).cycle().take(take).fuse();
+
+    let (os, or) = flume::unbounded::&amp;lt;(i32, VecWrapperClient&amp;lt;Message&amp;gt;)&amp;gt;();
+
+    let dmux = Demultiplexer::new(values, or.into_stream(), |e| {
+        println!(&amp;quot;Error while sending in demux : {}&amp;quot;, e);
+    });
+
+    os.send((1, VecWrapperClient::new(1, take &amp;#x2F; 3 + 10))).unwrap();
+    os.send((2, VecWrapperClient::new(2, take &amp;#x2F; 3 + 10))).unwrap();
+    os.send((3, VecWrapperClient::new(3, take &amp;#x2F; 3 + 10))).unwrap();
+
+    let _ = tokio::spawn(dmux.run()).await;
+
+    println!(&amp;quot;Application exiting&amp;quot;)
+}
+
+#[derive(Debug, Clone)]
+struct Message {
+    id: i32,
+    word: String,
+}
+
+impl Display for Message {
+    fn fmt(&amp;amp;self, f: &amp;amp;mut std::fmt::Formatter&amp;lt;&amp;#x27;_&amp;gt;) -&amp;gt; std::fmt::Result {
+        write!(f, &amp;quot;{}&amp;quot;, self.word)
+    }
+}
+
+impl Identifiable for Message {
+    type Id = i32;
+
+    fn id&amp;lt;&amp;#x27;a&amp;gt;(&amp;amp;&amp;#x27;a self) -&amp;gt; &amp;amp;&amp;#x27;a Self::Id {
+        &amp;amp;self.id
+    }
+}
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;I hope you noticed &lt;code&gt;VecWrapperClient&lt;&#x2F;code&gt; type that certainly does not come from library. What is that? 
+To test &lt;code&gt;Demultiplexer&lt;&#x2F;code&gt; I wanted to have cheap &lt;code&gt;Sink&lt;&#x2F;code&gt;. I could use flume&#x27;s channels, but they are surpisingly expensive to use in my benchmarks, cluttering flamegraphs. Fortunately, I found that good old &lt;code&gt;Vec&lt;&#x2F;code&gt; implements &lt;code&gt;Sink&lt;&#x2F;code&gt;! I did not want to implement my own &lt;code&gt;Sink&lt;&#x2F;code&gt; as they are much more complex to implement than &lt;code&gt;Streams&lt;&#x2F;code&gt;. Therefore I created thin wrapper (in order to be able to implement custom &lt;code&gt;Drop&lt;&#x2F;code&gt;) on &lt;code&gt;Vec&lt;&#x2F;code&gt; and forwarded all &lt;code&gt;Sinks&lt;&#x2F;code&gt; functions to &lt;code&gt;Vec&lt;&#x2F;code&gt;&#x27;s implementation.&lt;&#x2F;p&gt;
+&lt;p&gt;In real application &lt;code&gt;Sinks&lt;&#x2F;code&gt; should probably be senders of some channels to make it really functional, but for simple application like this that is mostly used for benchmarking and profiling, this should be enough.&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;pub struct VecWrapperClient&amp;lt;T&amp;gt;(i32, Vec&amp;lt;T&amp;gt;);
+
+impl&amp;lt;T&amp;gt; VecWrapperClient&amp;lt;T&amp;gt; {
+    pub fn new(id: i32, capacity: usize) -&amp;gt; Self {
+        VecWrapperClient(id, Vec::with_capacity(capacity))
+    }
+}
+
+impl&amp;lt;T&amp;gt; Deref for VecWrapperClient&amp;lt;T&amp;gt; {
+    type Target = Vec&amp;lt;T&amp;gt;;
+
+    fn deref(&amp;amp;self) -&amp;gt; &amp;amp;Self::Target {
+        &amp;amp;self.1
+    }
+}
+
+impl&amp;lt;T&amp;gt; DerefMut for VecWrapperClient&amp;lt;T&amp;gt; {
+    fn deref_mut(&amp;amp;mut self) -&amp;gt; &amp;amp;mut Self::Target {
+        &amp;amp;mut self.1
+    }
+}
+
+impl&amp;lt;Item: Unpin&amp;gt; Sink&amp;lt;Item&amp;gt; for VecWrapperClient&amp;lt;Item&amp;gt; {
+    type Error = &amp;lt;Vec&amp;lt;Item&amp;gt; as Sink&amp;lt;Item&amp;gt;&amp;gt;::Error;
+
+    fn poll_ready(
+        mut self: std::pin::Pin&amp;lt;&amp;amp;mut Self&amp;gt;,
+        cx: &amp;amp;mut std::task::Context&amp;lt;&amp;#x27;_&amp;gt;,
+    ) -&amp;gt; std::task::Poll&amp;lt;Result&amp;lt;(), Self::Error&amp;gt;&amp;gt; {
+        Pin::new(&amp;amp;mut self.1).poll_ready(cx)
+    }
+
+    fn start_send(mut self: std::pin::Pin&amp;lt;&amp;amp;mut Self&amp;gt;, item: Item) -&amp;gt; Result&amp;lt;(), Self::Error&amp;gt; {
+        Pin::new(&amp;amp;mut self.1).start_send(item)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin&amp;lt;&amp;amp;mut Self&amp;gt;,
+        cx: &amp;amp;mut std::task::Context&amp;lt;&amp;#x27;_&amp;gt;,
+    ) -&amp;gt; std::task::Poll&amp;lt;Result&amp;lt;(), Self::Error&amp;gt;&amp;gt; {
+        Pin::new(&amp;amp;mut self.1).poll_flush(cx)
+    }
+
+    fn poll_close(
+        mut self: std::pin::Pin&amp;lt;&amp;amp;mut Self&amp;gt;,
+        cx: &amp;amp;mut std::task::Context&amp;lt;&amp;#x27;_&amp;gt;,
+    ) -&amp;gt; std::task::Poll&amp;lt;Result&amp;lt;(), Self::Error&amp;gt;&amp;gt; {
+        Pin::new(&amp;amp;mut self.1).poll_close(cx)
+    }
+}
+
+impl&amp;lt;T&amp;gt; Drop for VecWrapperClient&amp;lt;T&amp;gt; {
+    fn drop(&amp;amp;mut self) {
+        println!(&amp;quot;Vec client {} received {} messages&amp;quot;, self.0, self.1.len());
+    }
+}
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;As a profiler I chose perf with &lt;a href=&quot;https:&#x2F;&#x2F;github.com&#x2F;KDAB&#x2F;hotspot&quot;&gt;hotspot&lt;&#x2F;a&gt; to view recorded data. For preliminary examination I used &lt;code&gt;time&lt;&#x2F;code&gt; command from Linux.&lt;&#x2F;p&gt;
+&lt;p&gt;My machine is using AMD Ryzen 5 3600 (Six core processor) with hyper-threading enabled. I have 16GB of RAM, operating system is Linux Mint 20.1. I am using rustc 1.49.0 (e1884a8e3 2020-12-29).&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;profiling&quot;&gt;Profiling&lt;&#x2F;h3&gt;
+&lt;p&gt;Simple results from time are (based on 5 runs average) presented below.&lt;&#x2F;p&gt;
+&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;Implementation&lt;&#x2F;th&gt;&lt;th&gt;Time (s)&lt;&#x2F;th&gt;&lt;&#x2F;tr&gt;&lt;&#x2F;thead&gt;&lt;tbody&gt;
+&lt;tr&gt;&lt;td&gt;select!&lt;&#x2F;td&gt;&lt;td&gt;15.8&lt;&#x2F;td&gt;&lt;&#x2F;tr&gt;
+&lt;tr&gt;&lt;td&gt;select_biased!&lt;&#x2F;td&gt;&lt;td&gt;15.8&lt;&#x2F;td&gt;&lt;&#x2F;tr&gt;
+&lt;tr&gt;&lt;td&gt;SelectAllCustom&lt;&#x2F;td&gt;&lt;td&gt;22.1&lt;&#x2F;td&gt;&lt;&#x2F;tr&gt;
+&lt;&#x2F;tbody&gt;&lt;&#x2F;table&gt;
+&lt;p&gt;Not so bad, but can we do better and how?&lt;&#x2F;p&gt;
+&lt;p&gt;One simple optimization comes from &lt;a href=&quot;https:&#x2F;&#x2F;nnethercote.github.io&#x2F;perf-book&#x2F;build-configuration.html&quot;&gt;Rust Performance Book&lt;&#x2F;a&gt; from chapter about build configurations. It says that we can help compiler produce better code at the cost of compilation time. I added following in my Cargo.toml:&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;toml&quot; class=&quot;language-toml &quot;&gt;&lt;code class=&quot;language-toml&quot; data-lang=&quot;toml&quot;&gt;[profile.release]
+codegen-units = 1
+lto = true
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;For details about what exactly are those flags imposing on compiler, please see Rust Performance book.&lt;&#x2F;p&gt;
+&lt;p&gt;Results of this simple optimization are presented below:&lt;&#x2F;p&gt;
+&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;Implementation&lt;&#x2F;th&gt;&lt;th&gt;Time (s)&lt;&#x2F;th&gt;&lt;&#x2F;tr&gt;&lt;&#x2F;thead&gt;&lt;tbody&gt;
+&lt;tr&gt;&lt;td&gt;select!&lt;&#x2F;td&gt;&lt;td&gt;13.5&lt;&#x2F;td&gt;&lt;&#x2F;tr&gt;
+&lt;tr&gt;&lt;td&gt;select_biased!&lt;&#x2F;td&gt;&lt;td&gt;12.3&lt;&#x2F;td&gt;&lt;&#x2F;tr&gt;
+&lt;tr&gt;&lt;td&gt;SelectAllCustom&lt;&#x2F;td&gt;&lt;td&gt;17.2&lt;&#x2F;td&gt;&lt;&#x2F;tr&gt;
+&lt;&#x2F;tbody&gt;&lt;&#x2F;table&gt;
+&lt;p&gt;Quite nice! Having added 3 lines in Cargo.toml and waiting some more time for application to compile, I achieved non-negligible performance improvement!&lt;&#x2F;p&gt;
+&lt;p&gt;Let&#x27;s try actually profiling running application and see what it is doing to spot additional fields for improvement.
+To make profiling possible some tweaks to release profile need to be applied to include debug symbols in release build. Final Cargo.toml section for release profile looks like this:&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;toml&quot; class=&quot;language-toml &quot;&gt;&lt;code class=&quot;language-toml&quot; data-lang=&quot;toml&quot;&gt;[profile.release]
+codegen-units = 1
+debug = 1
+lto = true
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Since analyzing application performance with profilers can be tedious and this blog post is already lengthy, I decided to only analyze already fastest version using &lt;code&gt;select_biased!&lt;&#x2F;code&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;Using following perf command I collected trace of the application:&lt;&#x2F;p&gt;
+&lt;pre&gt;&lt;code&gt;perf record --call-graph dwarf -o select_biased_vanilla.perf.data .&amp;#x2F;target&amp;#x2F;release&amp;#x2F;stream-demux
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;And later displayed a flamegraph using hotspot:&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;img src=&quot;.&#x2F;..&#x2F;..&#x2F;images&#x2F;2&#x2F;flamegraph_select_biased_vanilla.png&quot; alt=&quot;flamegraph_select_biased_vanilla&quot; &#x2F;&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;Since it is quite big and might not be visible on smaller screens, here&#x27;s zoom into interesting section:&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;img src=&quot;.&#x2F;..&#x2F;..&#x2F;images&#x2F;2&#x2F;flamegraph_select_biased_vanilla_zoom.png&quot; alt=&quot;flamegraph_select_biased_vanilla_zoom&quot; &#x2F;&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;It clearly show that a lot of time is used polling &lt;code&gt;flume::async::RecvStream&amp;lt;T&amp;gt;&lt;&#x2F;code&gt;. Why? &lt;&#x2F;p&gt;
+&lt;p&gt;In my implementation, orders are delivered by flumes&#x27;s async channel. And orders are always polled first, even though they arrive rarely. This is done for correctness reasons. Can we do anything about it?
+Answer really depends on:&lt;&#x2F;p&gt;
+&lt;ul&gt;
+&lt;li&gt;characteristics of your application&lt;&#x2F;li&gt;
+&lt;li&gt;how desperate you are&lt;&#x2F;li&gt;
+&lt;&#x2F;ul&gt;
+&lt;p&gt;I am polling orders first, since input is a &lt;code&gt;Stream&lt;&#x2F;code&gt; that is always ready. I tested what happens if I reverse polling order and performance increased significantly, but application no longers served its purpose as no message was delivered to appropriate &lt;code&gt;Sink&lt;&#x2F;code&gt; (hence &lt;code&gt;Drop&lt;&#x2F;code&gt; implementation on my &lt;code&gt;Sink&lt;&#x2F;code&gt; to report number of received messages).&lt;&#x2F;p&gt;
+&lt;p&gt;If your application is under such a heavy load that you risk never polling orders as in my case, solution exists, but is not simple. In other cases, if you can afford loosing a few messages sometimes due to input being ready before orders for some time, you might want to revert order of polling in &lt;code&gt;select_biased&lt;&#x2F;code&gt;. You need to test it yourself, corectness in a priority, performance comes afterwards!&lt;&#x2F;p&gt;
+&lt;p&gt;For those eager to learn what crazy things you can do to overcome this problem, below I present my solution. It only works correctly under assumption that your system is under extremely heavy load. Extremely. Heavy. Load. So heavy that input stream always has ready message. It is unlikely in real applications, because such streams usually come from some external resources that require network roundtrip to get information and thus leave some time for orders. In any way, measure first!&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;some-dark-magic&quot;&gt;Some dark magic&lt;&#x2F;h3&gt;
+&lt;p&gt;&lt;code&gt;select_biased&lt;&#x2F;code&gt; is fastest to execute, but has one irritating feature - it always polls the same stream first and we are unable to change it ... are we? It is a macro, so it expands to something. Why don&#x27;t we see into what? To do this you can use &lt;a href=&quot;https:&#x2F;&#x2F;github.com&#x2F;dtolnay&#x2F;cargo-expand&quot;&gt;&lt;code&gt;cargo expand&lt;&#x2F;code&gt; subcommand&lt;&#x2F;a&gt;.&lt;&#x2F;p&gt;
+&lt;p&gt;Code that it actually expands to is listed below. It is quite lenghty, that is the power of macros! I cleaned it a bit to make it more readable. Actual &lt;code&gt;cargo expand&lt;&#x2F;code&gt; will give you much uglier code.&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;pub async fn run(mut self) {
+    loop {
+        {
+            enum PrivResult&amp;lt;_0, _1&amp;gt; {
+                _0(_0),
+                _1(_1),
+                Complete,
+            }
+            let select_result = {
+                let mut orders = self.orders.next();
+                let mut input = self.input.next();
+                let poll_fn = |__cx: &amp;amp;mut futures::task::Context&amp;lt;&amp;#x27;_&amp;gt;| {
+                    let mut any_polled = false;
+                 let mut orders = |__cx: &amp;amp;mut futures::task::Context&amp;lt;&amp;#x27;_&amp;gt;| {
+                        let mut orders = unsafe { Pin::new_unchecked(&amp;amp;mut orders) };
+                        if futures::future::FusedFuture::is_terminated(&amp;amp;orders) {
+                            None
+                        } else {
+                            Some(
+                                futures::future::FutureExt::poll_unpin(&amp;amp;mut orders, __cx)
+                                    .map(PrivResult::_0),
+                            )
+                        }
+                    };
+                    let orders: &amp;amp;mut dyn FnMut(
+                        &amp;amp;mut futures::task::Context&amp;lt;&amp;#x27;_&amp;gt;,
+                    )
+                        -&amp;gt; Option&amp;lt;futures::task::Poll&amp;lt;_&amp;gt;&amp;gt; = &amp;amp;mut orders;
+                 let mut input = |__cx: &amp;amp;mut futures::task::Context&amp;lt;&amp;#x27;_&amp;gt;| {
+                        let mut input = unsafe { Pin::new_unchecked(&amp;amp;mut input) };
+                        if futures::future::FusedFuture::is_terminated(&amp;amp;input) {
+                            None
+                        } else {
+                            Some(
+                                futures::future::FutureExt::poll_unpin(&amp;amp;mut input, __cx)
+                                    .map(PrivResult::_1),
+                            )
+                        }
+                    };
+                    let input: &amp;amp;mut dyn FnMut(
+                        &amp;amp;mut futures::task::Context&amp;lt;&amp;#x27;_&amp;gt;,
+                    )
+                        -&amp;gt; Option&amp;lt;futures::task::Poll&amp;lt;_&amp;gt;&amp;gt; = &amp;amp;mut input;
+                 let mut select_arr = [orders, input];
+                    for poller in &amp;amp;mut select_arr {
+                        let poller: &amp;amp;mut &amp;amp;mut dyn FnMut(
+                            &amp;amp;mut futures::task::Context&amp;lt;&amp;#x27;_&amp;gt;,
+                        )
+                            -&amp;gt; Option&amp;lt;futures::task::Poll&amp;lt;_&amp;gt;&amp;gt; = poller;
+                        match poller(__cx) {
+                            Some(x @ futures::task::Poll::Ready(_)) =&amp;gt; return x,
+                            Some(futures::task::Poll::Pending) =&amp;gt; {
+                                any_polled = true;
+                            }
+                            None =&amp;gt; {}
+                        }
+                    }
+                    if !any_polled {
+                        futures::task::Poll::Ready(PrivResult::Complete)
+                    } else {
+                        futures::task::Poll::Pending
+                    }
+                };
+                futures::future::poll_fn(poll_fn).await
+            };
+            match select_result {
+                PrivResult::_0(order) =&amp;gt; {
+                    if let Some(order) = order {
+                        self.sinks.insert(order.0, order.1);
+                    }
+                }
+                PrivResult::_1(input) =&amp;gt; match input {
+                    Some(input) =&amp;gt; self.forward_input(input).await,
+                    None =&amp;gt; {
+                        break;
+                    }
+                },
+                PrivResult::Complete =&amp;gt; break,
+            }
+        }
+    }
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Whooah! This is long! What it does is in essence, creating closures to poll each &lt;code&gt;Stream&lt;&#x2F;code&gt;, doing some on stack dynamic dispatch, creating array (&lt;code&gt;select_arr&lt;&#x2F;code&gt;) of those functions and later just calling it untill any succeeds (or none).
+It is clearly visible that array is always in the same order. Could we tweak it a bit? Would it help? Let&#x27;s try!&lt;&#x2F;p&gt;
+&lt;p&gt;Idea is to count messages arriving in &lt;code&gt;Demultiplexer&lt;&#x2F;code&gt; and when they reach certain threshold, poll orders once and reset threshold. As I said, this only works almost correctly in systems that are under heavy load, that can afford tiny message loss and that do not receive many orders compared to number of messages.&lt;&#x2F;p&gt;
+&lt;p&gt;To implement it I added a counter in run functions like this:&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;pub async fn run(mut self) {
+    let mut counter = 0i32;
+    loop { &amp;#x2F;* some code *&amp;#x2F; }
+}
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;I also modified code constructing &lt;code&gt;select_arr&lt;&#x2F;code&gt; a bit. Rest of code is that same as on previous lisitng of macro expand.&lt;&#x2F;p&gt;
+&lt;pre data-lang=&quot;rust&quot; class=&quot;language-rust &quot;&gt;&lt;code class=&quot;language-rust&quot; data-lang=&quot;rust&quot;&gt;let mut select_arr = if counter &amp;lt; 100 {
+    counter += 1;
+    [input, orders]
+} else {
+    counter = 0;
+    [orders, input]
+};
+&lt;&#x2F;code&gt;&lt;&#x2F;pre&gt;
+&lt;p&gt;Running the program shows that result is almost correct. Less messages are delivered to sinks, but number of lost messages is extremely low compared to overall number. If this is acceptable depends on you and your application. In my case of my application it is not a problem.&lt;&#x2F;p&gt;
+&lt;p&gt;Let&#x27;s try it out with &lt;code&gt;time&lt;&#x2F;code&gt; first.&lt;&#x2F;p&gt;
+&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;Implementation&lt;&#x2F;th&gt;&lt;th&gt;Time (s)&lt;&#x2F;th&gt;&lt;&#x2F;tr&gt;&lt;&#x2F;thead&gt;&lt;tbody&gt;
+&lt;tr&gt;&lt;td&gt;select_biased_custom!&lt;&#x2F;td&gt;&lt;td&gt;9.6&lt;&#x2F;td&gt;&lt;&#x2F;tr&gt;
+&lt;&#x2F;tbody&gt;&lt;&#x2F;table&gt;
+&lt;p&gt;Less than 10 seconds! Quite fast compared to other versions. At least loosing messages has attributed to some performance gains.&lt;&#x2F;p&gt;
+&lt;p&gt;Analysis of perf data in hotspot also shows that code polling flume&#x27;s Receiver is gone. It is invoked, but so little that it is not even shown on flamegraph.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;img src=&quot;.&#x2F;..&#x2F;..&#x2F;images&#x2F;2&#x2F;flamegraph_select_biased_custom.png&quot; alt=&quot;flamegraph_select_biased_custom&quot; &#x2F;&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;I also tried to use timing to poll orders only sometimes, but using time is suprisingly (or not at all) expensive in such a tight loops. Maybe it would not matter in real application, but here flamegraph was ruthless.&lt;&#x2F;p&gt;
+&lt;p&gt;The code probably can go faster, for example by implementing mechanism to store &lt;code&gt;Sinks&lt;&#x2F;code&gt; other than &lt;code&gt;HashMap&lt;&#x2F;code&gt; as flamegraph shows that storing it there is not as trivial as it might seem. However, this would be clearly overoptimization in most use cases ;). &lt;&#x2F;p&gt;
+&lt;p&gt;I hope you learnt something interesting from this lengthy blog post! The final part is probably premature optimization, but I had some fun doing it and it was clearly a development for me to investigate it!&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;references&quot;&gt;References&lt;&#x2F;h3&gt;
+&lt;p&gt;&lt;a href=&quot;https:&#x2F;&#x2F;docs.rs&#x2F;futures&#x2F;0.3.12&#x2F;futures&#x2F;prelude&#x2F;trait.Stream.html&quot;&gt;Official Stream documentation.&lt;&#x2F;a&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;a href=&quot;https:&#x2F;&#x2F;docs.rs&#x2F;futures&#x2F;0.3.12&#x2F;futures&#x2F;stream&#x2F;trait.StreamExt.html&quot;&gt;Official StreamExt documentation.&lt;&#x2F;a&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;a href=&quot;https:&#x2F;&#x2F;github.com&#x2F;KDAB&#x2F;hotspot&#x2F;releases&quot;&gt;Download hotspot&lt;&#x2F;a&gt; - version 1.3.0 (and NOT continuous build) have proper Rust symbol demangling&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;a href=&quot;https:&#x2F;&#x2F;nnethercote.github.io&#x2F;perf-book&#x2F;title-page.html&quot;&gt;Rust Performance Book&lt;&#x2F;a&gt;&lt;&#x2F;p&gt;
+</content>
+	</entry>
+	<entry xml:lang="en">
+		<title>What is perpendicular programming?</title>
+		<published>2021-01-06T00:00:00+00:00</published>
+		<updated>2021-01-06T00:00:00+00:00</updated>
+		<link href="https://szarykott.github.io/1-what-perpendicular/" type="text/html"/>
+		<id>https://szarykott.github.io/1-what-perpendicular/</id>
+		<content type="html">&lt;p&gt;Most programmers seem to be obsessed with parallel programming nowadays. Only some know about new paradigm that is emerging, slowly, but inevitably. It is called perpendicular programming. What is this new paradigm and why should you start using is today?&lt;&#x2F;p&gt;
+&lt;span id=&quot;continue-reading&quot;&gt;&lt;&#x2F;span&gt;&lt;h3 id=&quot;comparison-with-parallel-programming&quot;&gt;Comparison with parallel programming&lt;&#x2F;h3&gt;
+&lt;p&gt;Parallel programming is all about executing some instructions in parallel on separate CPU cores as depicted below:&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;img src=&quot;.&#x2F;..&#x2F;..&#x2F;images&#x2F;1&#x2F;parallel.png&quot; alt=&quot;parallel lines&quot; &#x2F;&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;There is a notable problem with this approach. As clearly visible in the picture - threds of execution never meet, making parallel programming paradigm less usable. Perpendicual programming addresses this problem.&lt;&#x2F;p&gt;
+&lt;p&gt;&lt;img src=&quot;.&#x2F;..&#x2F;..&#x2F;images&#x2F;1&#x2F;perpendicular.png&quot; alt=&quot;perpendicular lines&quot; &#x2F;&gt;&lt;&#x2F;p&gt;
+&lt;p&gt;In this new paradigm threads never fail to meet at a certain point in time. What is more then provide values to each other exactly at the time other threads need it, not earlier, not later. This allows for excellent performance.&lt;&#x2F;p&gt;
+&lt;h3 id=&quot;where-to-read-more&quot;&gt;Where to read more&lt;&#x2F;h3&gt;
+&lt;p&gt;Currently this paradigm is not very well known, but it has a bright future. Look for it in newest Microsoft and Google blog posts!&lt;&#x2F;p&gt;
+</content>
+	</entry>
+</feed>
