@@ -13,7 +13,6 @@ build_search_index = false
 
 title = "Szarykott's dev blog"
 description = "Szarykott's dev blog"
-generate_feed = true
 
 taxonomies = [
     {name = "tags", rss = true},
